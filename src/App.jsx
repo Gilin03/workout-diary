@@ -2,6 +2,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "./lib/supabase";
 import "./App.css";
 
+const CURRENT_SCHEMA_VERSION = 2;
+
 const emptyForm = {
   workout_date: "",
   pushup_1: "",
@@ -13,6 +15,7 @@ const emptyForm = {
   legraise_1: "",
   legraise_2: "",
   legraise_3: "",
+  intensity: "보통",
 };
 
 function App() {
@@ -24,6 +27,7 @@ function App() {
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
+  const [migrationMessage, setMigrationMessage] = useState("");
 
   const fileInputRef = useRef(null);
 
@@ -33,6 +37,7 @@ function App() {
 
   async function loadRecords() {
     setLoading(true);
+    setError("");
 
     const { data, error } = await supabase
       .from("workout_records")
@@ -41,10 +46,55 @@ function App() {
 
     if (error) {
       setError(`기록을 불러오지 못했습니다: ${error.message}`);
-    } else {
-      setRecords(data || []);
+      setLoading(false);
+      return;
     }
 
+    let loadedRecords = data || [];
+
+    // V1 → V2 자동 변환
+    const v1Records = loadedRecords.filter(
+      (record) => (record.schema_version ?? 1) === 1,
+    );
+
+    if (v1Records.length > 0) {
+      const v2Records = v1Records.map((record) => ({
+        ...record,
+        intensity: record.intensity || "보통",
+        schema_version: CURRENT_SCHEMA_VERSION,
+      }));
+
+      const { error: migrationError } = await supabase
+        .from("workout_records")
+        .upsert(v2Records, {
+          onConflict: "id",
+        });
+
+      if (migrationError) {
+        setError(`V1 → V2 변환에 실패했습니다: ${migrationError.message}`);
+        setLoading(false);
+        return;
+      }
+
+      setMigrationMessage(
+        `V1 → V2 변환 완료 · 기존 기록 ${v1Records.length}건 보존`,
+      );
+
+      // 변환된 데이터를 화면에도 즉시 반영
+      loadedRecords = loadedRecords.map((record) => {
+        if ((record.schema_version ?? 1) === 1) {
+          return {
+            ...record,
+            intensity: record.intensity || "보통",
+            schema_version: CURRENT_SCHEMA_VERSION,
+          };
+        }
+
+        return record;
+      });
+    }
+
+    setRecords(loadedRecords);
     setLoading(false);
   }
 
@@ -86,9 +136,9 @@ function App() {
       return;
     }
 
-    const numericFields = requiredFields.filter(
-      (field) => field !== "workout_date",
-    );
+   const numericFields = requiredFields.filter(
+  (field) => !["workout_date", "intensity"].includes(field),
+);
 
     const hasInvalidNumber = numericFields.some(
       (field) =>
@@ -111,7 +161,8 @@ function App() {
       legraise_1: Number(form.legraise_1),
       legraise_2: Number(form.legraise_2),
       legraise_3: Number(form.legraise_3),
-      schema_version: 1,
+      intensity: form.intensity,
+      schema_version: CURRENT_SCHEMA_VERSION,
     };
 
     setSaving(true);
@@ -160,6 +211,7 @@ function App() {
       legraise_1: String(record.legraise_1),
       legraise_2: String(record.legraise_2),
       legraise_3: String(record.legraise_3),
+      intensity: record.intensity || "보통",
     });
 
     setMessage("");
@@ -373,30 +425,29 @@ function App() {
     });
 
     const uniqueDays = new Set(
-  weeklyRecords.map((record) => record.workout_date)
-).size;
+      weeklyRecords.map((record) => record.workout_date),
+    ).size;
 
-return {
-  days: uniqueDays,
+    return {
+      days: uniqueDays,
 
-  pushup: weeklyRecords.reduce(
-    (sum, record) =>
-      sum + record.pushup_1 + record.pushup_2 + record.pushup_3,
-    0,
-  ),
+      pushup: weeklyRecords.reduce(
+        (sum, record) =>
+          sum + record.pushup_1 + record.pushup_2 + record.pushup_3,
+        0,
+      ),
 
-  squat: weeklyRecords.reduce(
-    (sum, record) =>
-      sum + record.squat_1 + record.squat_2 + record.squat_3,
-    0,
-  ),
+      squat: weeklyRecords.reduce(
+        (sum, record) => sum + record.squat_1 + record.squat_2 + record.squat_3,
+        0,
+      ),
 
-  legraise: weeklyRecords.reduce(
-    (sum, record) =>
-      sum + record.legraise_1 + record.legraise_2 + record.legraise_3,
-    0,
-  ),
-};
+      legraise: weeklyRecords.reduce(
+        (sum, record) =>
+          sum + record.legraise_1 + record.legraise_2 + record.legraise_3,
+        0,
+      ),
+    };
   }, [records]);
 
   return (
@@ -412,8 +463,12 @@ return {
         </div>
 
         <div className="version-badge">
-          데이터 형식 <strong>v1</strong>
+          데이터 형식 <strong>v2</strong>
         </div>
+
+        {migrationMessage && (
+          <div className="migration-badge">{migrationMessage}</div>
+        )}
       </header>
 
       <section className="intro">
@@ -492,6 +547,20 @@ return {
               />
             </label>
 
+            <label className="intensity-input">
+              <span>운동 강도</span>
+
+              <select
+                name="intensity"
+                value={form.intensity}
+                onChange={handleChange}
+              >
+                <option value="쉬움">쉬움</option>
+                <option value="보통">보통</option>
+                <option value="어려움">어려움</option>
+              </select>
+            </label>
+
             <div className="exercise-inputs">
               <ExerciseInput
                 title="팔굽혀펴기"
@@ -565,6 +634,7 @@ return {
             <span>팔굽혀펴기</span>
             <span>스쿼트</span>
             <span>레그레이즈</span>
+            <span>강도</span>
             <span>관리</span>
           </div>
           {loading ? (
@@ -616,6 +686,12 @@ return {
                   b={record.legraise_2}
                   c={record.legraise_3}
                 />
+
+                <div className="intensity-cell">
+                  <span className={`intensity-badge ${record.intensity}`}>
+                    {record.intensity || "보통"}
+                  </span>
+                </div>
 
                 <div className="row-actions">
                   <button type="button" onClick={() => startEdit(record)}>
